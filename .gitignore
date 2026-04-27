@@ -1,0 +1,78 @@
+# =========================
+# Node / pnpm
+# =========================
+node_modules/
+.pnpm-store/
+**/.pnpm-store/
+
+# =========================
+# Frontend build outputs
+# =========================
+build/
+dist/
+.vite/
+
+# =========================
+# Release / installer outputs
+# =========================
+release/
+*.zip
+*.rar
+*.7z
+*.exe
+*.msi
+*.dll
+*.so
+*.dylib
+*.pyd
+*.lib
+*.pak
+*.pkg
+*.pyz
+
+# =========================
+# Python environments
+# =========================
+venv/
+.venv/
+.venv-win/
+backend/venv/
+backend/.venv/
+backend/.venv-win/
+
+# =========================
+# Python build outputs
+# =========================
+backend/backend_dist/
+backend/pyinstaller_build/
+backend/build/
+backend/dist/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# =========================
+# Logs / cache
+# =========================
+.cache/
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+
+# =========================
+# OS / editor
+# =========================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# =========================
+# Env files
+# =========================
+.env
+.env.local
+.env.*.local

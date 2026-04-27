@@ -1,0 +1,13 @@
+fastapi>=0.104.1
+uvicorn>=0.24.0
+PyInstaller>=6.10.0
+PyQt6>=6.7.0
+PyQt6-WebEngine>=6.7.0
+ctranslate2>=4.6.1
+transformers>=4.35.2
+torch>=2.5.0
+sentencepiece>=0.1.99
+pydantic>=2.5.2
+llama-cpp-python>=0.2.75
+huggingface-hub>=0.23.0
+hf_xet>=1.1.0
