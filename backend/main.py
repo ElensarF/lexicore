@@ -54,6 +54,72 @@ app.add_middleware(
 hf_download_lock = threading.Lock()
 hf_download_jobs = {}
 
+model_registry_lock = threading.Lock()
+model_registry = {}
+
+def _infer_model_format(filename: str):
+    lowered = filename.lower()
+    if lowered.endswith(".gguf"):
+        return "gguf"
+    if lowered.endswith(".onnx"):
+        return "onnx"
+    if lowered.endswith(".safetensors") or lowered.endswith(".bin"):
+        return "pytorch"
+    return "unknown"
+
+def _infer_quantization(filename: str):
+    match = re.search(r"(Q\d(?:_[A-Z0-9]+)*)", filename, flags=re.IGNORECASE)
+    return match.group(1) if match else ""
+
+def _model_meta_path(model_path: str):
+    return model_path + ".lexicore.json"
+
+def scan_model_registry():
+    root = os.path.join(custom_cache_dir, "hf_models")
+    scanned = {}
+    if os.path.isdir(root):
+        for dirpath, _, filenames in os.walk(root):
+            for file_name in filenames:
+                if file_name.endswith(".lexicore.json") or file_name.endswith(".part"):
+                    continue
+                full_path = os.path.join(dirpath, file_name)
+                try:
+                    size_bytes = os.path.getsize(full_path)
+                except OSError:
+                    continue
+
+                meta_path = _model_meta_path(full_path)
+                meta = None
+                if os.path.exists(meta_path):
+                    try:
+                        with open(meta_path, "r", encoding="utf-8") as handle:
+                            meta = json.load(handle)
+                    except Exception:
+                        meta = None
+
+                model_id = ""
+                if isinstance(meta, dict):
+                    model_id = str(meta.get("modelId") or "")
+                if not model_id:
+                    rel = os.path.relpath(full_path, root).replace("\\", "/")
+                    model_id = f"hf:{rel}"
+
+                scanned[model_id] = {
+                    "modelId": model_id,
+                    "path": full_path,
+                    "filename": file_name,
+                    "format": (meta.get("format") if isinstance(meta, dict) else None) or _infer_model_format(file_name),
+                    "quantization": (meta.get("quantization") if isinstance(meta, dict) else None) or _infer_quantization(file_name),
+                    "sizeBytes": (meta.get("sizeBytes") if isinstance(meta, dict) else None) or size_bytes,
+                    "repoId": (meta.get("repoId") if isinstance(meta, dict) else None) or "",
+                    "revision": (meta.get("revision") if isinstance(meta, dict) else None) or "",
+                    "downloadedAt": (meta.get("downloadedAt") if isinstance(meta, dict) else None) or 0.0,
+                }
+
+    with model_registry_lock:
+        model_registry.clear()
+        model_registry.update(scanned)
+
 def _validate_hf_repo_id(repo_id: str):
     repo_id = repo_id.strip()
     if not repo_id or len(repo_id) > 200:
@@ -83,6 +149,7 @@ class TranslationRequest(BaseModel):
     source_lang: str
     target_lang: str
     quality: str = "fast" # "fast" (Opus-MT), "high" (NLLB) veya "ultra" (Aya-23)
+    model_id: str = ""
 
 class CloudTranslationRequest(BaseModel):
     text: str
@@ -888,8 +955,7 @@ def get_aya_model():
         model_path = hf_hub_download(
             repo_id=AYA_REPO,
             filename=AYA_FILE,
-            cache_dir=custom_cache_dir,
-            local_dir_use_symlinks=False # Disk alanindan tasarruf icin
+            cache_dir=custom_cache_dir
         )
         
         # LLM yuklemesi (n_ctx=2048 ceviri icin yeterli bir baglam penceresi)
@@ -908,6 +974,25 @@ def get_aya_model():
         return None
     except Exception as e:
         print(f"Failed to load Aya-23 model: {e}")
+        return None
+
+def get_custom_gguf_model(model_id: str, model_path: str):
+    cache_key = f"gguf:{model_id}"
+    if cache_key in loaded_models:
+        return loaded_models[cache_key]
+
+    try:
+        from llama_cpp import Llama
+        llm = Llama(
+            model_path=model_path,
+            n_ctx=2048,
+            n_gpu_layers=-1,
+            verbose=False,
+        )
+        loaded_models[cache_key] = {"model": llm}
+        return loaded_models[cache_key]
+    except Exception as e:
+        print(f"Failed to load custom GGUF model: {e}")
         return None
 
 def get_nllb_model():
@@ -998,6 +1083,13 @@ def model_status():
         "ayaModelReady": aya_ready,
     }
 
+@app.get("/api/models/list")
+def list_models():
+    with model_registry_lock:
+        items = list(model_registry.values())
+    items.sort(key=lambda item: (item.get("format") or "", item.get("filename") or ""))
+    return {"models": items}
+
 @app.post("/api/hf/repo-files")
 def hf_repo_files(req: HFRepoFilesRequest):
     try:
@@ -1072,6 +1164,26 @@ def hf_download(req: HFDownloadRequest):
                             hf_download_jobs[job_id]["downloadedBytes"] += len(chunk)
 
             os.replace(tmp_path, target_path)
+            meta = {
+                "modelId": f"hf:{repo_id}@{revision}:{filename}",
+                "repoId": repo_id,
+                "revision": revision,
+                "filename": filename,
+                "path": target_path,
+                "format": _infer_model_format(filename),
+                "quantization": _infer_quantization(filename),
+                "sizeBytes": os.path.getsize(target_path) if os.path.exists(target_path) else 0,
+                "downloadedAt": time.time(),
+            }
+            try:
+                with open(_model_meta_path(target_path), "w", encoding="utf-8") as handle:
+                    json.dump(meta, handle, ensure_ascii=False)
+            except Exception:
+                pass
+            try:
+                scan_model_registry()
+            except Exception:
+                pass
             with hf_download_lock:
                 if job_id in hf_download_jobs:
                     hf_download_jobs[job_id]["status"] = "done"
@@ -1101,6 +1213,10 @@ def hf_download_status(jobId: str):
 
 @app.on_event("startup")
 def startup_event():
+    try:
+        scan_model_registry()
+    except Exception:
+        pass
     start_global_clipboard_shortcut_listener()
 
 @app.get("/api/clipboard-text")
@@ -1355,6 +1471,42 @@ def translate(req: TranslationRequest):
         return {"translatedText": ""}
 
     source_lang_code = resolve_source_lang(req.text, req.source_lang)
+
+    if req.model_id:
+        with model_registry_lock:
+            meta = model_registry.get(req.model_id)
+        if not meta:
+            raise HTTPException(status_code=404, detail="Secilen model bulunamadi.")
+
+        model_format = (meta.get("format") or "").lower()
+        model_path = meta.get("path") or ""
+        if model_format != "gguf":
+            raise HTTPException(status_code=400, detail=f"Bu model formati henuz desteklenmiyor: {model_format}")
+        if not model_path or not os.path.exists(model_path):
+            raise HTTPException(status_code=404, detail="Model dosyasi bulunamadi.")
+
+        model_data = get_custom_gguf_model(req.model_id, model_path)
+        if not model_data:
+            raise HTTPException(status_code=500, detail="Model yuklenemedi.")
+
+        llm = model_data["model"]
+        source_lang_name = LANGUAGE_NAMES.get(source_lang_code, source_lang_code)
+        target_lang_name = LANGUAGE_NAMES.get(req.target_lang, req.target_lang)
+        system_prompt = f"Sen uzman bir cevirmen yapay zekasin. Gelen metni {source_lang_name} dilinden {target_lang_name} diline cevir. Asla yorum yapma, sadece ceviriyi ver."
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": req.text},
+        ]
+        try:
+            response = llm.create_chat_completion(
+                messages=messages,
+                max_tokens=1024,
+                temperature=0.1,
+            )
+            translated_text = response["choices"][0]["message"]["content"].strip()
+            return {"translatedText": translated_text}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Model ceviri hatasi: {str(e)}")
         
     if req.quality == "ultra":
         # Ultra Kalite Model (Aya-23 LLM) kullanimi

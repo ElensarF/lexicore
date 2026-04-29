@@ -275,7 +275,8 @@ const translateText = async (
   to: string,
   provider: Provider,
   apiKeys: ApiKeys,
-  localQuality: LocalModelQuality
+  localQuality: LocalModelQuality,
+  modelId: string
 ) => {
   if (!text.trim()) return '';
   if (from === to) return text;
@@ -346,7 +347,8 @@ const translateText = async (
           text: text,
           source_lang: from,
           target_lang: to,
-          quality: localQuality
+          quality: localQuality,
+          model_id: modelId
         })
       });
       if (!res.ok) {
@@ -376,6 +378,7 @@ export default function Translation() {
     localModelQuality,
     localOnlyProcessing,
     clipboardShortcut,
+    selectedModelId,
   } = useStore();
   const [sourceText, setSourceText] = useState('');
   const [translatedText, setTranslatedText] = useState('');
@@ -397,6 +400,7 @@ export default function Translation() {
   const clipboardCaptureVersionRef = useRef(0);
   const lastManualSourceLangRef = useRef<string>('');
   const autoSwapGuardRef = useRef<string>('');
+  const swapPipelineRef = useRef<{ phase: 'idle' | 'detect' | 'swap' | 'translate'; key: string }>({ phase: 'idle', key: '' });
   const effectiveProvider = localOnlyProcessing ? 'local' : provider;
   const activeSourceLang = sourceLang === 'auto' ? detectedSourceLang || 'en' : sourceLang;
 
@@ -418,16 +422,21 @@ export default function Translation() {
 
   useEffect(() => {
     const timer = setTimeout(async () => {
+      const DEBUG = true;
       if (sourceText.trim()) {
         setIsTranslating(true);
+        swapPipelineRef.current.phase = 'detect';
         let resolvedSourceLang = sourceLang;
         if (sourceLang === 'auto') {
           try {
+            if (DEBUG) console.debug('[lexicore:auto-swap]', 'detect:start', { sourceLang, targetLang });
             resolvedSourceLang = await detectLanguage(sourceText);
             setDetectedSourceLang(resolvedSourceLang);
+            if (DEBUG) console.debug('[lexicore:auto-swap]', 'detect:done', { resolvedSourceLang });
           } catch {
             resolvedSourceLang = 'en';
             setDetectedSourceLang('en');
+            if (DEBUG) console.debug('[lexicore:auto-swap]', 'detect:error->fallback', { resolvedSourceLang });
           }
         } else {
           setDetectedSourceLang('');
@@ -442,26 +451,36 @@ export default function Translation() {
           swapTarget !== targetLang &&
           autoSwapGuardRef.current !== swapKey
         ) {
+          swapPipelineRef.current.phase = 'swap';
           autoSwapGuardRef.current = swapKey;
+          swapPipelineRef.current.key = swapKey;
+          if (DEBUG) console.debug('[lexicore:auto-swap]', 'swap:apply', { from: targetLang, to: swapTarget, swapKey });
+          setTranslatedText('');
+          setWordMenu(null);
           setTargetLang(swapTarget);
           setIsTranslating(false);
           return;
         }
 
-        const result = await translateText(sourceText, resolvedSourceLang, targetLang, effectiveProvider, apiKeys, localModelQuality);
+        swapPipelineRef.current.phase = 'translate';
+        if (DEBUG) console.debug('[lexicore:auto-swap]', 'translate:start', { resolvedSourceLang, targetLang, provider: effectiveProvider, modelId: selectedModelId || '' });
+        const result = await translateText(sourceText, resolvedSourceLang, targetLang, effectiveProvider, apiKeys, localModelQuality, selectedModelId);
         setTranslatedText(result);
         setWordMenu(null);
         setIsTranslating(false);
+        swapPipelineRef.current.phase = 'idle';
       } else {
         setTranslatedText('');
         setWordMenu(null);
         setDetectedSourceLang('');
         autoSwapGuardRef.current = '';
+        swapPipelineRef.current.phase = 'idle';
+        swapPipelineRef.current.key = '';
       }
     }, 600); // Debounce
 
     return () => clearTimeout(timer);
-  }, [sourceText, sourceLang, targetLang, effectiveProvider, apiKeys, localModelQuality]);
+  }, [sourceText, sourceLang, targetLang, effectiveProvider, apiKeys, localModelQuality, selectedModelId]);
 
   // Global clipboard shortcut listener
   useEffect(() => {
@@ -472,7 +491,7 @@ export default function Translation() {
         const clipboardText = await readClipboardText();
         if (clipboardText) setSourceText(clipboardText);
       } catch (err) {
-        console.error("Panodan okuma baÅŸarÄ±sÄ±z oldu. LÃ¼tfen tarayÄ±cÄ± izinlerini kontrol edin.", err);
+        console.error("Panodan okuma başarısız oldu. Lütfen tarayıcı izinlerini kontrol edin.", err);
       }
     };
     
@@ -751,7 +770,7 @@ export default function Translation() {
 
   return (
     <div className="flex-1 flex flex-col h-full max-w-6xl mx-auto w-full p-6">
-      <div className="flex items-center justify-between mb-8">
+      <div className="hidden items-center justify-between mb-8">
         <h1 className="text-2xl font-semibold tracking-tight text-foreground">LexiCore Çeviri</h1>
         
         <div className="flex items-center gap-2 bg-card rounded-full p-1 border border-border/50 shadow-sm">

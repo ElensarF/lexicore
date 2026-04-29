@@ -30,9 +30,20 @@ export default function Settings() {
     setLocalOnlyProcessing,
     clipboardShortcut,
     setClipboardShortcut,
+    selectedModelId,
+    setSelectedModelId,
     resetAllData,
   } = useStore();
   const [modelStatus, setModelStatus] = useState<ModelStatus | null>(null);
+  const [availableModels, setAvailableModels] = useState<Array<{
+    modelId: string;
+    filename: string;
+    format: string;
+    quantization: string;
+    sizeBytes: number;
+    repoId: string;
+    revision: string;
+  }>>([]);
   const [hfUrl, setHfUrl] = useState('');
   const [hfRepoId, setHfRepoId] = useState('');
   const [hfRevision, setHfRevision] = useState('main');
@@ -52,8 +63,20 @@ export default function Settings() {
     }
   };
 
+  const refreshAvailableModels = async () => {
+    try {
+      const response = await fetch('/api/models/list');
+      if (!response.ok) return;
+      const data = await response.json() as { models: typeof availableModels };
+      setAvailableModels(data.models ?? []);
+    } catch {
+      setAvailableModels([]);
+    }
+  };
+
   useEffect(() => {
     void refreshModelStatus();
+    void refreshAvailableModels();
   }, []);
 
   const parseHfUrl = (value: string) => {
@@ -143,6 +166,17 @@ export default function Settings() {
     if (window.confirm('Geçmiş, API anahtarları ve tüm ayarlar sıfırlansın mı?')) {
       resetAllData();
     }
+  };
+
+  const formatBytes = (value: number) => {
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let size = value || 0;
+    let unitIndex = 0;
+    while (size >= 1024 && unitIndex < units.length - 1) {
+      size /= 1024;
+      unitIndex += 1;
+    }
+    return `${size.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
   };
 
   return (
@@ -317,6 +351,58 @@ export default function Settings() {
             </div>
             
             <Separator className="bg-border/50" />
+
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <Label className="text-base">Model Yöneticisi</Label>
+                  <p className="text-sm text-muted-foreground">İndirilen modellerden birini seçip yerel çeviride kullanın.</p>
+                </div>
+                <Button variant="outline" size="sm" onClick={refreshAvailableModels} className="rounded-full gap-2">
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  Yenile
+                </Button>
+              </div>
+
+              <Select value={selectedModelId} onValueChange={setSelectedModelId} disabled={!availableModels.length}>
+                <SelectTrigger className="w-full rounded-xl h-12 bg-background border-border/50 focus:ring-primary/20 transition-all">
+                  <SelectValue placeholder={availableModels.length ? 'Model seçin (opsiyonel)' : 'İndirilen model bulunamadı'} />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="">Varsayılan (Otomatik)</SelectItem>
+                  {availableModels.map((model) => (
+                    <SelectItem key={model.modelId} value={model.modelId}>
+                      {model.filename} {model.format ? `• ${model.format}` : ''} {model.quantization ? `• ${model.quantization}` : ''}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+
+              {selectedModelId && (
+                <div className="rounded-xl border border-border/50 bg-muted/20 p-4 text-sm">
+                  {(() => {
+                    const selected = availableModels.find((item) => item.modelId === selectedModelId);
+                    if (!selected) return <div className="text-muted-foreground">Seçilen model bulunamadı.</div>;
+                    return (
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                        <div>
+                          <div className="text-xs text-muted-foreground">Format</div>
+                          <div className="font-medium">{selected.format || 'unknown'}</div>
+                        </div>
+                        <div>
+                          <div className="text-xs text-muted-foreground">Quantization</div>
+                          <div className="font-medium">{selected.quantization || '-'}</div>
+                        </div>
+                        <div>
+                          <div className="text-xs text-muted-foreground">Boyut</div>
+                          <div className="font-medium">{formatBytes(selected.sizeBytes)}</div>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
+            </div>
 
             <div className="flex items-center justify-between">
               <div className="space-y-0.5">

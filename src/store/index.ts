@@ -30,6 +30,7 @@ interface AppState {
   localModelQuality: LocalModelQuality;
   localOnlyProcessing: boolean;
   clipboardShortcut: ClipboardShortcut;
+  selectedModelId: string;
   apiKeys: ApiKeys;
   setTheme: (theme: Theme) => void;
   setSourceLang: (lang: string) => void;
@@ -38,6 +39,7 @@ interface AppState {
   setLocalModelQuality: (quality: LocalModelQuality) => void;
   setLocalOnlyProcessing: (enabled: boolean) => void;
   setClipboardShortcut: (shortcut: ClipboardShortcut) => void;
+  setSelectedModelId: (modelId: string) => void;
   setApiKeys: (keys: Partial<ApiKeys>) => void;
   addHistoryItem: (item: Omit<HistoryItem, 'id' | 'createdAt'>) => void;
   toggleFavorite: (id: string) => void;
@@ -55,6 +57,7 @@ const defaultState = {
   localModelQuality: 'fast' as LocalModelQuality,
   localOnlyProcessing: false,
   clipboardShortcut: 'ctrl_c_c' as ClipboardShortcut,
+  selectedModelId: '',
   apiKeys: {
     deepl: '',
     openai: '',
@@ -73,6 +76,7 @@ export const useStore = create<AppState>()(
       setLocalModelQuality: (localModelQuality) => set({ localModelQuality }),
       setLocalOnlyProcessing: (localOnlyProcessing) => set({ localOnlyProcessing }),
       setClipboardShortcut: (clipboardShortcut) => set({ clipboardShortcut }),
+      setSelectedModelId: (selectedModelId) => set({ selectedModelId }),
       setApiKeys: (keys) => set((state) => ({ apiKeys: { ...state.apiKeys, ...keys } })),
       
       addHistoryItem: (item) => set((state) => ({
