@@ -35,9 +35,6 @@ const LANGUAGES = {
 
 const tabs = [
   { key: 'text', label: 'Metin', path: '/' },
-  { key: 'write', label: 'Write', path: '/' },
-  { key: 'image', label: 'Görsel', disabled: true },
-  { key: 'files', label: 'Dosyalar', path: '/' },
   { key: 'history', label: 'Geçmiş', path: '/history' },
 ];
 
@@ -161,4 +158,3 @@ export function AppBar() {
     </header>
   );
 }
-

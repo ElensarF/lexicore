@@ -422,7 +422,7 @@ export default function Translation() {
 
   useEffect(() => {
     const timer = setTimeout(async () => {
-      const DEBUG = true;
+      const DEBUG = false;
       if (sourceText.trim()) {
         setIsTranslating(true);
         swapPipelineRef.current.phase = 'detect';
