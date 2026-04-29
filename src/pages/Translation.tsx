@@ -395,6 +395,8 @@ export default function Translation() {
   } | null>(null);
   const wordMenuRef = useRef<HTMLSpanElement | null>(null);
   const clipboardCaptureVersionRef = useRef(0);
+  const lastManualSourceLangRef = useRef<string>('');
+  const autoSwapGuardRef = useRef<string>('');
   const effectiveProvider = localOnlyProcessing ? 'local' : provider;
   const activeSourceLang = sourceLang === 'auto' ? detectedSourceLang || 'en' : sourceLang;
 
@@ -407,6 +409,12 @@ export default function Translation() {
     return { words, chars, readingTime };
   };
   const stats = getStats();
+
+  useEffect(() => {
+    if (sourceLang !== 'auto') {
+      lastManualSourceLangRef.current = sourceLang;
+    }
+  }, [sourceLang]);
 
   useEffect(() => {
     const timer = setTimeout(async () => {
@@ -425,6 +433,21 @@ export default function Translation() {
           setDetectedSourceLang('');
         }
 
+        const swapKey = `${resolvedSourceLang}:${targetLang}:${sourceText.slice(0, 64)}`;
+        const swapTarget = lastManualSourceLangRef.current;
+        if (
+          sourceLang === 'auto' &&
+          resolvedSourceLang === targetLang &&
+          swapTarget &&
+          swapTarget !== targetLang &&
+          autoSwapGuardRef.current !== swapKey
+        ) {
+          autoSwapGuardRef.current = swapKey;
+          setTargetLang(swapTarget);
+          setIsTranslating(false);
+          return;
+        }
+
         const result = await translateText(sourceText, resolvedSourceLang, targetLang, effectiveProvider, apiKeys, localModelQuality);
         setTranslatedText(result);
         setWordMenu(null);
@@ -433,6 +456,7 @@ export default function Translation() {
         setTranslatedText('');
         setWordMenu(null);
         setDetectedSourceLang('');
+        autoSwapGuardRef.current = '';
       }
     }, 600); // Debounce
 
@@ -652,8 +676,11 @@ export default function Translation() {
         body: JSON.stringify({
           word,
           sentence: translatedText,
+          source_text: sourceText,
+          token_index: index,
           source_lang: activeSourceLang,
           target_lang: targetLang,
+          quality: localModelQuality,
           provider: effectiveProvider,
           api_key: effectiveProvider === 'openai' ? apiKeys.openai : '',
         }),

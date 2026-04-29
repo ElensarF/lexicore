@@ -33,6 +33,13 @@ export default function Settings() {
     resetAllData,
   } = useStore();
   const [modelStatus, setModelStatus] = useState<ModelStatus | null>(null);
+  const [hfUrl, setHfUrl] = useState('');
+  const [hfRepoId, setHfRepoId] = useState('');
+  const [hfRevision, setHfRevision] = useState('main');
+  const [hfFiles, setHfFiles] = useState<string[]>([]);
+  const [hfSelectedFile, setHfSelectedFile] = useState('');
+  const [hfDownloadJobId, setHfDownloadJobId] = useState<string | null>(null);
+  const [hfDownloadProgress, setHfDownloadProgress] = useState({ downloadedBytes: 0, totalBytes: 0, status: '', error: '' });
 
   const refreshModelStatus = async () => {
     try {
@@ -48,6 +55,89 @@ export default function Settings() {
   useEffect(() => {
     void refreshModelStatus();
   }, []);
+
+  const parseHfUrl = (value: string) => {
+    try {
+      const url = new URL(value.trim());
+      if (url.hostname !== 'huggingface.co') return { repoId: '', filename: '' };
+      const parts = url.pathname.split('/').filter(Boolean);
+      if (parts.length < 2) return { repoId: '', filename: '' };
+      const repoId = `${parts[0]}/${parts[1]}`;
+      const resolveIndex = parts.findIndex((part) => part === 'resolve' || part === 'blob');
+      if (resolveIndex !== -1 && parts.length > resolveIndex + 2) {
+        const filename = parts.slice(resolveIndex + 2).join('/');
+        return { repoId, filename };
+      }
+      return { repoId, filename: '' };
+    } catch {
+      return { repoId: '', filename: '' };
+    }
+  };
+
+  const fetchHfFiles = async (repoId: string, revision: string) => {
+    const response = await fetch('/api/hf/repo-files', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo_id: repoId, revision }),
+    });
+    if (!response.ok) throw new Error('HuggingFace dosya listesi alınamadı.');
+    const data = await response.json() as { files: string[] };
+    const preferred = data.files
+      .filter((file) => /\.(gguf|onnx|bin|safetensors)$/i.test(file))
+      .slice(0, 200);
+    setHfFiles(preferred);
+    if (!hfSelectedFile && preferred.length) setHfSelectedFile(preferred[0]);
+  };
+
+  const startHfDownload = async () => {
+    if (!hfRepoId || !hfSelectedFile) return;
+    setHfDownloadProgress({ downloadedBytes: 0, totalBytes: 0, status: 'running', error: '' });
+    const response = await fetch('/api/hf/download', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo_id: hfRepoId, filename: hfSelectedFile, revision: hfRevision }),
+    });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({})) as { detail?: string };
+      throw new Error(errorData.detail || 'İndirme başlatılamadı.');
+    }
+    const data = await response.json() as { jobId: string };
+    setHfDownloadJobId(data.jobId);
+  };
+
+  useEffect(() => {
+    if (!hfDownloadJobId) return;
+    let cancelled = false;
+    const timer = window.setInterval(async () => {
+      try {
+        const res = await fetch(`/api/hf/download-status?jobId=${encodeURIComponent(hfDownloadJobId)}`);
+        if (!res.ok) throw new Error('İndirme durumu alınamadı.');
+        const job = await res.json() as { downloadedBytes: number; totalBytes: number; status: string; error?: string };
+        if (cancelled) return;
+        setHfDownloadProgress({
+          downloadedBytes: job.downloadedBytes || 0,
+          totalBytes: job.totalBytes || 0,
+          status: job.status,
+          error: job.error || '',
+        });
+        if (job.status === 'done' || job.status === 'error') {
+          window.clearInterval(timer);
+        }
+      } catch (error) {
+        if (cancelled) return;
+        setHfDownloadProgress((prev) => ({
+          ...prev,
+          status: 'error',
+          error: error instanceof Error ? error.message : 'İndirme durumu okunamadı.',
+        }));
+        window.clearInterval(timer);
+      }
+    }, 700);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [hfDownloadJobId]);
 
   const handleResetAllData = () => {
     if (window.confirm('Geçmiş, API anahtarları ve tüm ayarlar sıfırlansın mı?')) {
@@ -241,6 +331,95 @@ export default function Settings() {
             </div>
 
             <Separator className="bg-border/50" />
+
+            <div className="space-y-4">
+              <div className="space-y-1">
+                <Label className="text-base">HuggingFace Model İndir</Label>
+                <p className="text-sm text-muted-foreground">
+                  HuggingFace linkini yapıştırın, dosyayı seçin ve yerel önbelleğe indirin.
+                </p>
+              </div>
+              <div className="flex flex-col gap-3">
+                <Input
+                  value={hfUrl}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setHfUrl(value);
+                    const parsed = parseHfUrl(value);
+                    setHfRepoId(parsed.repoId);
+                    if (parsed.filename) setHfSelectedFile(parsed.filename);
+                  }}
+                  placeholder="https://huggingface.co/owner/repo veya .../resolve/main/model.gguf"
+                  className="rounded-xl h-12 bg-background border-border/50 focus-visible:ring-primary/20"
+                />
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <Input
+                    value={hfRepoId}
+                    onChange={(e) => setHfRepoId(e.target.value)}
+                    placeholder="owner/repo"
+                    className="rounded-xl h-12 bg-background border-border/50 focus-visible:ring-primary/20"
+                  />
+                  <Input
+                    value={hfRevision}
+                    onChange={(e) => setHfRevision(e.target.value)}
+                    placeholder="main"
+                    className="rounded-xl h-12 bg-background border-border/50 focus-visible:ring-primary/20"
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="rounded-xl h-12"
+                    onClick={() => void fetchHfFiles(hfRepoId, hfRevision)}
+                    disabled={!hfRepoId.trim()}
+                  >
+                    Dosyaları getir
+                  </Button>
+                </div>
+                <Select value={hfSelectedFile} onValueChange={setHfSelectedFile} disabled={!hfFiles.length}>
+                  <SelectTrigger className="w-full rounded-xl h-12 bg-background border-border/50 focus:ring-primary/20 transition-all">
+                    <SelectValue placeholder={hfFiles.length ? 'Dosya seçin' : 'Önce dosyaları getir'} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {hfFiles.map((file) => (
+                      <SelectItem key={file} value={file}>
+                        {file}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <div className="flex items-center gap-3">
+                  <Button
+                    type="button"
+                    className="rounded-xl h-11"
+                    onClick={() => void startHfDownload()}
+                    disabled={!hfRepoId.trim() || !hfSelectedFile.trim() || hfDownloadProgress.status === 'running'}
+                  >
+                    İndir
+                  </Button>
+                  <div className="flex-1">
+                    <div className="h-2 rounded-full bg-muted overflow-hidden">
+                      <div
+                        className="h-full bg-primary transition-all"
+                        style={{
+                          width: hfDownloadProgress.totalBytes > 0
+                            ? `${Math.min(100, Math.round((hfDownloadProgress.downloadedBytes / hfDownloadProgress.totalBytes) * 100))}%`
+                            : hfDownloadProgress.status === 'running' ? '20%' : '0%',
+                        }}
+                      />
+                    </div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      {hfDownloadProgress.status === 'running' && (
+                        hfDownloadProgress.totalBytes > 0
+                          ? `${Math.round((hfDownloadProgress.downloadedBytes / hfDownloadProgress.totalBytes) * 100)}% indiriliyor`
+                          : 'İndiriliyor...'
+                      )}
+                      {hfDownloadProgress.status === 'done' && 'İndirme tamamlandı.'}
+                      {hfDownloadProgress.status === 'error' && (hfDownloadProgress.error || 'İndirme hatası.')}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
             
             <div className="flex items-center justify-between">
               <div className="space-y-0.5">

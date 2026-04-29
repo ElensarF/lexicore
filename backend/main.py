@@ -8,6 +8,8 @@ import base64
 import html
 import io
 import re
+import uuid
+import urllib.parse
 import urllib.error
 import urllib.request
 import zipfile
@@ -49,6 +51,33 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+hf_download_lock = threading.Lock()
+hf_download_jobs = {}
+
+def _validate_hf_repo_id(repo_id: str):
+    repo_id = repo_id.strip()
+    if not repo_id or len(repo_id) > 200:
+        raise ValueError("Gecersiz repo_id.")
+    if "/" not in repo_id:
+        raise ValueError("repo_id 'owner/name' formatinda olmali.")
+    if ".." in repo_id or repo_id.startswith("/") or repo_id.endswith("/"):
+        raise ValueError("Gecersiz repo_id.")
+    return repo_id
+
+def _validate_hf_filename(filename: str):
+    filename = filename.strip().lstrip("/")
+    if not filename or len(filename) > 400:
+        raise ValueError("Gecersiz dosya adi.")
+    if ".." in filename:
+        raise ValueError("Gecersiz dosya adi.")
+    return filename
+
+def _hf_resolve_url(repo_id: str, filename: str, revision: str):
+    repo_id = urllib.parse.quote(repo_id, safe="/")
+    filename = urllib.parse.quote(filename, safe="/")
+    revision = urllib.parse.quote(revision or "main", safe="")
+    return f"https://huggingface.co/{repo_id}/resolve/{revision}/{filename}"
+
 class TranslationRequest(BaseModel):
     text: str
     source_lang: str
@@ -65,10 +94,22 @@ class CloudTranslationRequest(BaseModel):
 class WordAlternativesRequest(BaseModel):
     word: str
     sentence: str = ""
+    source_text: str = ""
+    token_index: int = -1
     source_lang: str = ""
     target_lang: str
+    quality: str = "fast"
     provider: str = ""
     api_key: str = ""
+
+class HFRepoFilesRequest(BaseModel):
+    repo_id: str
+    revision: str = "main"
+
+class HFDownloadRequest(BaseModel):
+    repo_id: str
+    filename: str
+    revision: str = "main"
 
 class DetectLanguageRequest(BaseModel):
     text: str
@@ -957,6 +998,107 @@ def model_status():
         "ayaModelReady": aya_ready,
     }
 
+@app.post("/api/hf/repo-files")
+def hf_repo_files(req: HFRepoFilesRequest):
+    try:
+        repo_id = _validate_hf_repo_id(req.repo_id)
+        revision = (req.revision or "main").strip()[:120]
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+    try:
+        from huggingface_hub import HfApi
+
+        api = HfApi()
+        files = api.list_repo_files(repo_id=repo_id, revision=revision)
+        return {"repoId": repo_id, "revision": revision, "files": files}
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"HuggingFace listesi alinmadi: {str(error)}")
+
+@app.post("/api/hf/download")
+def hf_download(req: HFDownloadRequest):
+    try:
+        repo_id = _validate_hf_repo_id(req.repo_id)
+        filename = _validate_hf_filename(req.filename)
+        revision = (req.revision or "main").strip()[:120]
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+    job_id = uuid.uuid4().hex
+    target_dir = os.path.join(custom_cache_dir, "hf_models", repo_id.replace("/", os.sep))
+    os.makedirs(target_dir, exist_ok=True)
+    target_path = os.path.join(target_dir, os.path.basename(filename))
+    tmp_path = target_path + ".part"
+    url = _hf_resolve_url(repo_id, filename, revision)
+
+    with hf_download_lock:
+        hf_download_jobs[job_id] = {
+            "status": "running",
+            "repoId": repo_id,
+            "filename": filename,
+            "revision": revision,
+            "url": url,
+            "targetPath": target_path,
+            "downloadedBytes": 0,
+            "totalBytes": 0,
+            "error": "",
+            "startedAt": time.time(),
+            "finishedAt": 0.0,
+        }
+
+    def run():
+        total_bytes = 0
+        try:
+            head_req = urllib.request.Request(url, method="HEAD")
+            with urllib.request.urlopen(head_req, timeout=45) as head_res:
+                total_bytes = int(head_res.headers.get("Content-Length") or 0)
+        except Exception:
+            total_bytes = 0
+
+        with hf_download_lock:
+            if job_id in hf_download_jobs:
+                hf_download_jobs[job_id]["totalBytes"] = total_bytes
+
+        try:
+            request = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(request, timeout=120) as response, open(tmp_path, "wb") as out:
+                while True:
+                    chunk = response.read(1024 * 256)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    with hf_download_lock:
+                        if job_id in hf_download_jobs:
+                            hf_download_jobs[job_id]["downloadedBytes"] += len(chunk)
+
+            os.replace(tmp_path, target_path)
+            with hf_download_lock:
+                if job_id in hf_download_jobs:
+                    hf_download_jobs[job_id]["status"] = "done"
+                    hf_download_jobs[job_id]["finishedAt"] = time.time()
+        except Exception as error:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+            with hf_download_lock:
+                if job_id in hf_download_jobs:
+                    hf_download_jobs[job_id]["status"] = "error"
+                    hf_download_jobs[job_id]["error"] = str(error)
+                    hf_download_jobs[job_id]["finishedAt"] = time.time()
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"jobId": job_id, "targetPath": target_path}
+
+@app.get("/api/hf/download-status")
+def hf_download_status(jobId: str):
+    with hf_download_lock:
+        job = hf_download_jobs.get(jobId)
+        if not job:
+            raise HTTPException(status_code=404, detail="Indirme bulunamadi.")
+        return dict(job)
+
 @app.on_event("startup")
 def startup_event():
     start_global_clipboard_shortcut_listener()
@@ -1027,11 +1169,84 @@ def extract_file_text_endpoint(req: FileTextRequest):
     except Exception as error:
         raise HTTPException(status_code=500, detail=f"Dosya okunamadi: {str(error)}")
 
+def _split_translation_tokens(text: str):
+    return re.split(r"(\s+)", text or "")
+
+def _normalize_word_token(token: str):
+    return re.sub(r"^[^\w]+|[^\w]+$", "", token or "", flags=re.UNICODE).lower()
+
+def _local_nbest_translations(source_text: str, source_lang: str, target_lang: str, quality: str, n_best: int = 6):
+    source_lang_code = resolve_source_lang(source_text, source_lang or "auto")
+
+    if quality == "high":
+        model_data = get_nllb_model()
+        if not model_data:
+            return []
+        tokenizer = model_data["tokenizer"]
+        model = model_data["model"]
+        src_lang_code = FLORES_MAP.get(source_lang_code, "eng_Latn")
+        tgt_lang_code = FLORES_MAP.get(target_lang, "eng_Latn")
+        tokenizer.src_lang = src_lang_code
+        inputs = tokenizer(source_text, return_tensors="pt", padding=True, truncation=True)
+        lang_code_to_id = getattr(tokenizer, "lang_code_to_id", {})
+        forced_bos_token_id = lang_code_to_id.get(tgt_lang_code)
+        if forced_bos_token_id is None:
+            forced_bos_token_id = tokenizer.convert_tokens_to_ids(tgt_lang_code)
+        outputs = model.generate(
+            **inputs,
+            forced_bos_token_id=forced_bos_token_id,
+            max_length=512,
+            num_beams=max(2, n_best),
+            num_return_sequences=max(1, min(n_best, 8)),
+            do_sample=False,
+        )
+        return [tokenizer.decode(output, skip_special_tokens=True) for output in outputs]
+
+    model_data = get_model(source_lang_code, target_lang)
+    if not model_data:
+        return []
+    tokenizer = model_data["tokenizer"]
+    model = model_data["model"]
+    inputs = tokenizer(source_text, return_tensors="pt", padding=True, truncation=True)
+    outputs = model.generate(
+        **inputs,
+        max_length=512,
+        num_beams=max(2, n_best),
+        num_return_sequences=max(1, min(n_best, 8)),
+        do_sample=False,
+    )
+    return [tokenizer.decode(output, skip_special_tokens=True) for output in outputs]
+
 @app.post("/api/word-alternatives")
 def word_alternatives(req: WordAlternativesRequest):
     word = req.word.strip()
     if not word:
         return {"alternatives": []}
+
+    if req.provider.lower() == "local" and req.source_text.strip() and req.token_index >= 0:
+        quality = (req.quality or "fast").lower()
+        base_tokens = _split_translation_tokens(req.sentence)
+        target_token = base_tokens[req.token_index] if req.token_index < len(base_tokens) else ""
+        target_norm = _normalize_word_token(target_token) or _normalize_word_token(word)
+
+        candidates = _local_nbest_translations(req.source_text, req.source_lang, req.target_lang, quality, n_best=6)
+        alternatives = []
+        seen = set()
+        for candidate in candidates:
+            tokens = _split_translation_tokens(candidate)
+            if req.token_index >= len(tokens):
+                continue
+            cand_norm = _normalize_word_token(tokens[req.token_index])
+            if not cand_norm or cand_norm == target_norm:
+                continue
+            if cand_norm in seen:
+                continue
+            seen.add(cand_norm)
+            alternatives.append(tokens[req.token_index].strip())
+            if len(alternatives) >= 6:
+                break
+        if alternatives:
+            return {"alternatives": alternatives}
 
     if req.provider.lower() == "openai" and req.api_key.strip():
         target_lang_name = LANGUAGE_NAMES.get(req.target_lang, req.target_lang)
